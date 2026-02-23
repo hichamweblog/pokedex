@@ -32,6 +32,14 @@ const STAT_COLORS: Record<string, string> = {
   speed: "bg-pink-400",
 };
 
+export async function generateStaticParams() {
+  const res = await fetch("https://pokeapi.co/api/v2/pokemon?limit=151", {
+    cache: "force-cache",
+  });
+  const data: { results: { name: string }[] } = await res.json();
+  return data.results.map((p) => ({ pokemonId: p.name }));
+}
+
 export default async function PokemonPage({
   params,
 }: {

@@ -15,7 +15,7 @@ export async function fetchPokemonList(
     ? `https://pokeapi.co/api/v2/pokemon?offset=0&limit=100000`
     : `https://pokeapi.co/api/v2/pokemon?offset=${offset}&limit=${limit}`;
 
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: "force-cache" });
   if (!response.ok) {
     throw new Error("Failed to fetch Pokémon list");
   }
@@ -38,7 +38,7 @@ export async function fetchPokemonList(
   }
   const pokemonData: Pokemon[] = await Promise.all(
     data.results.map(async (pokemon) => {
-      const res = await fetch(pokemon.url);
+      const res = await fetch(pokemon.url, { cache: "force-cache" });
       if (!res.ok) {
         throw new Error(`Failed to fetch data for ${pokemon.name}`);
       }
@@ -56,7 +56,7 @@ export async function fetchPokemonList(
 
 // Helper to fetch directly by next/previous URL
 export async function fetchPokemonByUrl(url: string): Promise<PokemonResponse> {
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: "force-cache" });
   if (!response.ok) {
     throw new Error("Failed to fetch Pokémon list");
   }
@@ -70,7 +70,7 @@ export async function fetchPokemonByUrl(url: string): Promise<PokemonResponse> {
 
   const pokemonData: Pokemon[] = await Promise.all(
     data.results.map(async (pokemon) => {
-      const res = await fetch(pokemon.url);
+      const res = await fetch(pokemon.url, { cache: "force-cache" });
       if (!res.ok) {
         throw new Error(`Failed to fetch data for ${pokemon.name}`);
       }
@@ -86,7 +86,9 @@ export async function fetchPokemonByUrl(url: string): Promise<PokemonResponse> {
   };
 }
 export async function fetchPokemon(id: string): Promise<Pokemon> {
-  const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
+  const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`, {
+    cache: "force-cache",
+  });
   if (res.status === 404) notFound();
   if (!res.ok) throw new Error(`Failed to fetch Pokémon: ${id}`);
   return res.json();

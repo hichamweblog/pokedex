@@ -497,6 +497,233 @@ This project has two loading skeletons:
 
 ---
 
+### 13. Caching — How Next.js 16 Caches Data and Routes
+
+Next.js 16 has **four distinct cache layers**, each with its own scope, lifetime, and purpose. Understanding them is key to building fast, predictable applications.
+
+---
+
+#### The Four Cache Layers
+
+| Cache                   | Scope                      | Lives in          | Duration                                     | What it stores                                          |
+| ----------------------- | -------------------------- | ----------------- | -------------------------------------------- | ------------------------------------------------------- |
+| **Request Memoization** | Single render pass         | Server memory     | Cleared after render                         | Deduplicates identical `fetch` calls within one request |
+| **Data Cache**          | All requests & deployments | Server (disk/CDN) | Persistent (until revalidated)               | The raw response of `fetch` calls                       |
+| **Full Route Cache**    | All requests               | Server (disk/CDN) | Persistent (until revalidated or redeployed) | Rendered HTML + RSC payload of static routes            |
+| **Router Cache**        | Current browser session    | Client memory     | Session / time-based                         | RSC payloads of visited and prefetched routes           |
+
+---
+
+#### Important: Default Behaviour Changed in Next.js 15+
+
+This is the most common source of confusion when upgrading:
+
+| Version           | Default `fetch` behaviour                         |
+| ----------------- | ------------------------------------------------- |
+| Next.js 13/14     | `force-cache` — everything cached by default      |
+| **Next.js 15/16** | **`no-store` — nothing cached unless you opt in** |
+
+In this project (Next.js 16), every `fetch` call without a `cache` option hits the network on every request. This was fixed intentionally — see below.
+
+---
+
+#### 1. Request Memoization
+
+React automatically deduplicates identical `fetch(url)` calls made during the **same render pass**. If two Server Components both call `fetchPokemon("pikachu")`, only one network request is made.
+
+```ts
+// Called in Layout and in Page — only ONE network request is made
+const pokemon = await fetchPokemon("pikachu"); // MISS → fetches
+const pokemon = await fetchPokemon("pikachu"); // HIT → returns cached
+```
+
+- **Automatic** — no configuration needed
+- **Resets** after each request completes
+- Only applies to `GET` requests within the React component tree
+- Does **not** apply to Route Handlers
+
+---
+
+#### 2. Data Cache
+
+The Data Cache is a **persistent server-side cache** that survives across multiple requests and deployments. It stores the raw responses of `fetch` calls.
+
+**Opt in with `force-cache`:**
+
+```ts
+const res = await fetch(url, { cache: "force-cache" });
+```
+
+The first request fetches from the network and writes to the cache. Every subsequent request — from any user, at any time — reads from the cache without hitting the network.
+
+**Opt in with time-based revalidation (`next.revalidate`):**
+
+```ts
+// Re-fetch at most once per hour (stale-while-revalidate)
+const res = await fetch(url, { next: { revalidate: 3600 } });
+```
+
+- Cached data is returned instantly
+- After the interval, the _next_ request gets stale data while Next.js re-fetches in the background
+- Once fresh data is ready, it replaces the stale entry
+
+**Opt out with `no-store`:**
+
+```ts
+const res = await fetch(url, { cache: "no-store" });
+// or simply omit the cache option in Next.js 15+
+const res = await fetch(url);
+```
+
+**Tag-based invalidation:**
+
+```ts
+// Tag a fetch response
+const res = await fetch(url, { next: { tags: ["pokemon-list"] } });
+
+// Invalidate all responses tagged "pokemon-list" on-demand
+import { revalidateTag } from "next/cache";
+revalidateTag("pokemon-list");
+```
+
+---
+
+#### 3. Full Route Cache
+
+When a route is **statically rendered**, Next.js caches the entire rendered output (HTML + RSC payload) on the server. Subsequent requests are served from this cache — no re-rendering.
+
+**What makes a route static vs dynamic?**
+
+| Condition                                 | Rendering                              |
+| ----------------------------------------- | -------------------------------------- |
+| No dynamic APIs used                      | Static — cached in Full Route Cache    |
+| Uses `searchParams`, `cookies`, `headers` | Dynamic — rendered on every request    |
+| Uses `fetch` with `no-store`              | Dynamic — opts out of Full Route Cache |
+| Uses `dynamic = 'force-dynamic'`          | Dynamic — always re-rendered           |
+
+**In this project:**
+
+```
+app/page.tsx          → DYNAMIC (uses searchParams for offset + search)
+app/[pokemonId]/page.tsx → STATIC  (only uses params, which is pre-rendered)
+```
+
+Because `app/page.tsx` reads `searchParams`, Next.js automatically treats it as dynamic. The route is re-rendered on every request, but the **Data Cache** still prevents redundant network calls.
+
+The Full Route Cache is cleared on each new deployment. It can also be cleared by revalidating the Data Cache via `revalidatePath()` or `revalidateTag()`.
+
+---
+
+#### 4. Client-side Router Cache
+
+When a user navigates between pages, Next.js stores the RSC payload of each visited route segment in the browser's memory. This enables:
+
+- **Instant back/forward navigation** — no server round-trip
+- **Partial rendering** — only the changed segments re-render; shared layouts are reused
+- **Prefetching** — `<Link>` components prefetch visible routes in the background
+
+**Duration:**
+
+| Segment type  | Cache duration                                                      |
+| ------------- | ------------------------------------------------------------------- |
+| Layouts       | Cached for the session                                              |
+| Static pages  | 5 minutes                                                           |
+| Dynamic pages | Not cached (in Next.js 15+, page segments are opted out by default) |
+
+Cleared on `router.refresh()` or full page reload.
+
+---
+
+#### How the Caches Interact
+
+```
+Request arrives
+      ↓
+  Full Route Cache? → HIT → return cached HTML immediately
+      ↓ MISS
+  Render Server Components
+      ↓
+  Data Cache? → HIT → return cached fetch response
+      ↓ MISS
+  Fetch from network → store in Data Cache
+      ↓
+  Memoization deduplicates identical fetches in same render
+      ↓
+  Cache rendered output in Full Route Cache (if static route)
+      ↓
+  Send HTML to browser → stored in Router Cache for navigation
+```
+
+> Invalidating the Data Cache (via `revalidatePath` / `revalidateTag`) also invalidates the Full Route Cache for affected routes, since the rendered output depends on the data.
+
+---
+
+#### How Caching Is Implemented in This Project
+
+Every `fetch` call in [utils/fetchData.ts](utils/fetchData.ts) uses `{ cache: "force-cache" }`:
+
+```ts
+// List fetch (paginated)
+const response = await fetch(url, { cache: "force-cache" });
+
+// Individual Pokémon detail fetches (inside Promise.all)
+const res = await fetch(pokemon.url, { cache: "force-cache" });
+
+// Single Pokémon for detail page
+const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`, {
+  cache: "force-cache",
+});
+```
+
+**Why `force-cache` is ideal here:** PokéAPI data never changes. There is no reason to re-fetch the same Pokémon data across requests. The cache persists until the app is redeployed.
+
+**The search path is the most important one to cache.** Without caching, every search request fetches all 100,000+ Pokémon from the network. With `force-cache`, that happens only once — ever.
+
+```ts
+// When search is active, this URL fetches ALL Pokémon (~100k entries)
+const url = search
+  ? `https://pokeapi.co/api/v2/pokemon?offset=0&limit=100000`
+  : `https://pokeapi.co/api/v2/pokemon?offset=${offset}&limit=${limit}`;
+
+const response = await fetch(url, { cache: "force-cache" }); // ← critical
+```
+
+**`generateStaticParams` on the detail page** pre-renders the first 151 Pokémon at build time, storing them in the Full Route Cache:
+
+```ts
+// app/[pokemonId]/page.tsx
+export async function generateStaticParams() {
+  const res = await fetch("https://pokeapi.co/api/v2/pokemon?limit=151", {
+    cache: "force-cache",
+  });
+  const data: { results: { name: string }[] } = await res.json();
+  return data.results.map((p) => ({ pokemonId: p.name }));
+}
+```
+
+- Gen 1 Pokémon are **pre-rendered at build time** — served as static HTML, no server rendering needed
+- All other Pokémon are **rendered on first visit** and then cached automatically
+
+---
+
+#### Caching Decision Tree
+
+```
+Is the data static / never changes?
+  └─ Yes → force-cache (cache forever, cleared on redeploy)
+
+Does the data change occasionally?
+  └─ Yes → next: { revalidate: N } (stale-while-revalidate every N seconds)
+
+Does the data change in response to user actions?
+  └─ Yes → revalidateTag() or revalidatePath() from a Server Action
+
+Must the data always be fresh per-request?
+  └─ Yes → no-store (or omit cache option in Next.js 15+)
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -555,3 +782,6 @@ Open [http://localhost:3000](http://localhost:3000).
 | Server-side fetch | `utils/fetchData.ts`                                         |
 | Error Boundaries  | `error.tsx` (runtime), `not-found.tsx` (404) — both scopes   |
 | Loading UI        | `loading.tsx` — Suspense skeletons for both routes           |
+| Data Cache        | `fetch` with `force-cache` in `utils/fetchData.ts`           |
+| Full Route Cache  | `generateStaticParams` in `app/[pokemonId]/page.tsx`         |
+| Router Cache      | `<Link>` prefetching across all navigation                   |

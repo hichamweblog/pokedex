@@ -3,6 +3,7 @@ import type {
   PokemonListResult,
   PokemonResponse,
 } from "@/types/pokemon";
+import { notFound } from "next/navigation";
 
 export async function fetchPokemonList(
   offset: number = 0,
@@ -86,6 +87,7 @@ export async function fetchPokemonByUrl(url: string): Promise<PokemonResponse> {
 }
 export async function fetchPokemon(id: string): Promise<Pokemon> {
   const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
+  if (res.status === 404) notFound();
   if (!res.ok) throw new Error(`Failed to fetch Pokémon: ${id}`);
   return res.json();
 }

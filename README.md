@@ -91,9 +91,58 @@ export default async function PokemonPage({
 
 ---
 
-### 5. `searchParams` for URL-driven State
+### 5. `searchParams` — URL-driven State (Deep Dive)
 
-The home page reads `searchParams` to handle pagination and search **without any client-side state**. The URL is the single source of truth.
+#### What is URL-driven State?
+
+It means using the **URL itself as your state**. Instead of storing values like the current page or search query in React's `useState`, you store them in the URL as query parameters.
+
+```
+❌  useState approach:  const [page, setPage] = useState(1)
+✅  URL-driven:         http://localhost:3000/?offset=20
+```
+
+The URL `/?offset=20&search=bulba` contains all the information needed to render the page. The server reads it, fetches the right data, and returns the correct HTML — no client-side state involved.
+
+---
+
+#### Mental model: the Request/Response cycle
+
+```
+User clicks "Next Page"
+        ↓
+<a href="/?offset=20">      ← just a link, no JS needed
+        ↓
+Browser navigates to /?offset=20
+        ↓
+Next.js Server Component receives searchParams = { offset: "20" }
+        ↓
+Server fetches page 2 from PokéAPI
+        ↓
+Returns fully-rendered HTML with page 2 data
+```
+
+Nothing is stored in memory. Every render is deterministic: same URL → same output.
+
+---
+
+#### Why is it better than `useState`?
+
+|                          | `useState` + `useEffect`                          | URL-driven state                                           |
+| ------------------------ | ------------------------------------------------- | ---------------------------------------------------------- |
+| **Shareable links**      | ❌ State is lost if you share the URL             | ✅ `/?search=pikachu&offset=40` opens exactly what you see |
+| **Browser back/forward** | ❌ Back button doesn't restore filters            | ✅ Browser history works naturally                         |
+| **Refresh**              | ❌ State resets to defaults                       | ✅ Page reloads with the same data                         |
+| **Bookmarks**            | ❌ Doesn't work                                   | ✅ Bookmark any page/search                                |
+| **SEO**                  | ❌ Server has no idea what to render              | ✅ Crawlers see real content per URL                       |
+| **Complexity**           | Higher — needs hydration, loading states, effects | Lower — just read params and fetch                         |
+| **Client JS**            | Required                                          | Not required (server renders it all)                       |
+
+---
+
+#### How it works in this project
+
+**Reading params (Server Component — zero JS sent to browser):**
 
 ```tsx
 // app/page.tsx
@@ -103,19 +152,131 @@ interface PageProps {
 
 export default async function Home({ searchParams }: PageProps) {
   const { offset, search } = await searchParams;
+  //  ↑ Next.js injects these from the URL automatically
+
   const data = await fetchPokemonList(
-    offset ? parseInt(offset) : 0,
+    offset ? parseInt(offset) : 0, // /?offset=40  → page 3
     20,
-    search ?? "",
+    search ?? "", // /?search=bulba → filter
   );
 }
 ```
 
-- `/?offset=20` → page 2
-- `/?search=bulba` → filtered results
-- No `useState`, no `useEffect`, no client JS required
+**Changing state (update the URL, trigger a re-render):**
 
-> `searchParams` is also a **Promise** in Next.js 15+ and must be awaited.
+```tsx
+// Pagination.tsx — plain HTML anchor, no JS
+<a href={`/?offset=${nextOffset}`}>Next</a>;
+
+// InputSearch.tsx — needs router for programmatic navigation
+("use client");
+const router = useRouter();
+router.push(`/?search=${encodeURIComponent(value)}`);
+// ↑ this changes the URL → Next.js re-runs the Server Component
+```
+
+When the URL changes, Next.js automatically re-runs the Server Component with the new `searchParams`, fetches fresh data, and streams the new HTML — no `useState`, no `useEffect`, no loading spinners needed.
+
+---
+
+#### How to implement it in any Next.js project
+
+**Step 1 — Define what your state looks like as URL params:**
+
+```
+Pagination   →  ?offset=20 or ?page=2
+Filters      →  ?category=fire&generation=1
+Sorting      →  ?sort=name&order=asc
+Search       →  ?search=pikachu
+Tab          →  ?tab=stats
+```
+
+**Step 2 — Read params in your Server Component:**
+
+```tsx
+// Any app/page.tsx or app/[segment]/page.tsx
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    page?: string;
+    sort?: string;
+    category?: string;
+  }>;
+}) {
+  const { page = "1", sort = "name", category } = await searchParams;
+
+  const data = await fetchItems({
+    page: parseInt(page),
+    sort,
+    category,
+  });
+
+  return <ItemList items={data} />;
+}
+```
+
+**Step 3 — Update the URL to change state:**
+
+```tsx
+// Option A: Server Component — use plain <a> or <Link>
+<Link href={`?page=${currentPage + 1}`}>Next</Link>;
+
+// Option B: Client Component — use useRouter for programmatic changes
+("use client");
+import { useRouter, useSearchParams } from "next/navigation";
+
+function SortDropdown() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const handleSort = (value: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("sort", value);
+    router.push(`?${params.toString()}`);
+    //  ↑ preserves existing params, only changes "sort"
+  };
+
+  return <select onChange={(e) => handleSort(e.target.value)} />;
+}
+```
+
+> **Tip:** Always use `new URLSearchParams(searchParams.toString())` when updating params so you don't accidentally wipe other existing params (e.g. don't lose `?search=pikachu` when changing the sort).
+
+**Step 4 — Show the current state to the user** (highlight active sort, fill search input, etc.):
+
+```tsx
+"use client";
+const searchParams = useSearchParams();
+const currentSort = searchParams.get("sort") ?? "name";
+
+// In InputSearch — pre-fill input with current search
+<input defaultValue={searchParams.get("search") ?? ""} />;
+```
+
+---
+
+#### Rule of thumb
+
+> If the user could reasonably **share, bookmark, or refresh** the page and expect to see the same thing — it belongs in the URL, not in `useState`.
+
+Good candidates for URL state:
+
+- Current page / offset
+- Search query
+- Active filters (type, category, tag)
+- Sort order
+- Active tab (if tabs show different data)
+
+Stay in `useState` for:
+
+- UI-only state (modal open/closed, tooltip visible)
+- Form input values before submission
+- Temporary animation state
+
+---
+
+> In Next.js 15+, `searchParams` is a **Promise** and must be awaited before reading its values.
 
 ---
 
@@ -236,6 +397,106 @@ export async function fetchPokemonList(offset = 0, limit = 20, search = "") {
 
 ---
 
+### 11. Error Handling — `error.tsx` & `not-found.tsx`
+
+Next.js App Router provides two dedicated files for error handling that wrap their route segment in an automatic React error boundary.
+
+#### `error.tsx` — Runtime Errors
+
+Shown when a Server Component throws during rendering or data fetching. Must be a **Client Component** (`"use client"`) because it receives the `error` object and a `reset` callback as props.
+
+```tsx
+// app/[pokemonId]/error.tsx
+"use client";
+
+export default function Error({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void; // re-attempts rendering the segment
+}) {
+  return (
+    <div>
+      <h1>Failed to load Pokémon</h1>
+      <button onClick={reset}>Try again</button>
+    </div>
+  );
+}
+```
+
+**Scoping:** `error.tsx` is segment-scoped. `app/[pokemonId]/error.tsx` only catches errors thrown inside the `[pokemonId]` segment. `app/error.tsx` catches errors from the home page. They do **not** catch errors in `layout.tsx` of the same segment (would need a parent `error.tsx`).
+
+#### `not-found.tsx` — 404 Errors
+
+Shown when `notFound()` is called from `next/navigation`. Used to distinguish a missing resource (404) from an unexpected crash.
+
+```ts
+// utils/fetchData.ts
+import { notFound } from "next/navigation";
+
+export async function fetchPokemon(id: string): Promise<Pokemon> {
+  const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
+  if (res.status === 404) notFound(); // → renders not-found.tsx
+  if (!res.ok) throw new Error("..."); // → renders error.tsx
+  return res.json();
+}
+```
+
+```tsx
+// app/[pokemonId]/not-found.tsx  (no "use client" needed)
+export default function NotFound() {
+  return <h1>Pokémon Not Found</h1>;
+}
+```
+
+| File            | Triggered by           | Must be client? |
+| --------------- | ---------------------- | --------------- |
+| `error.tsx`     | `throw new Error(...)` | Yes             |
+| `not-found.tsx` | `notFound()`           | No              |
+
+This project has both scoped (`app/[pokemonId]/`) and global (`app/`) versions of each file.
+
+---
+
+### 12. Loading UI — `loading.tsx`
+
+Next.js automatically wraps each `page.tsx` in a React `<Suspense>` boundary. While the Server Component is fetching data, the nearest `loading.tsx` is shown instantly — no manual `useState` or spinner logic needed.
+
+```tsx
+// app/loading.tsx  — shown while Home page fetches pokemon list
+export default function Loading() {
+  return (
+    <div className="grid grid-cols-5 gap-4">
+      {Array.from({ length: 20 }).map((_, i) => (
+        <div key={i} className="h-52 animate-pulse bg-white/20 rounded-lg" />
+      ))}
+    </div>
+  );
+}
+```
+
+**How it works:**
+
+```
+User navigates to /25
+       ↓
+Next.js streams loading.tsx immediately (skeleton UI)
+       ↓
+Server fetches Pokémon data in the background
+       ↓
+Next.js swaps loading.tsx → page.tsx content
+```
+
+This project has two loading skeletons:
+
+- [app/loading.tsx](app/loading.tsx) — pulse grid of 20 card skeletons for the home list
+- [app/[pokemonId]/loading.tsx](app/[pokemonId]/loading.tsx) — skeleton matching the detail page layout (header card, stat bars, ability rows)
+
+> `loading.tsx` does **not** need `"use client"` — it's a plain Server Component shown synchronously before any async work begins.
+
+---
+
 ## Project Structure
 
 ```
@@ -243,8 +504,14 @@ app/
 ├── globals.css             Global styles (Tailwind base)
 ├── layout.tsx              Root layout — shared across all pages
 ├── page.tsx                Home page — Pokémon list + search + pagination
+├── loading.tsx             Home page skeleton (Suspense)
+├── error.tsx               Home page error boundary ("use client")
+├── not-found.tsx           Global 404 page
 └── [pokemonId]/
-    └── page.tsx            Pokémon detail page — stats, abilities, moves
+    ├── page.tsx            Pokémon detail page — stats, abilities, moves
+    ├── loading.tsx         Detail page skeleton (Suspense)
+    ├── error.tsx           Detail page error boundary ("use client")
+    └── not-found.tsx       Pokémon-specific 404 page
 
 components/
 ├── InputSearch.tsx         "use client" — search input with router navigation
@@ -253,7 +520,7 @@ components/
 └── PokemonList.tsx         Grid of PokemonCard components
 
 utils/
-└── fetchData.ts            All PokéAPI fetch helpers
+└── fetchData.ts            All PokéAPI fetch helpers (notFound + throw)
 
 types/
 └── pokemon.ts              TypeScript interfaces for API responses
@@ -274,15 +541,17 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Key Concepts Summary
 
-| Concept           | Where used                                     |
-| ----------------- | ---------------------------------------------- |
-| Server Components | `app/page.tsx`, `app/[pokemonId]/page.tsx`     |
-| Client Components | `components/InputSearch.tsx`                   |
-| Dynamic Routes    | `app/[pokemonId]/page.tsx`                     |
-| `searchParams`    | `app/page.tsx` — offset & search               |
-| `params`          | `app/[pokemonId]/page.tsx` — pokemon id        |
-| `next/image`      | `PokemonCard`, detail page                     |
-| `next/link`       | `PokemonCard`, detail page back button         |
-| `next/navigation` | `InputSearch` — `useRouter`, `useSearchParams` |
-| Root Layout       | `app/layout.tsx` — metadata, fonts, global CSS |
-| Server-side fetch | `utils/fetchData.ts`                           |
+| Concept           | Where used                                                   |
+| ----------------- | ------------------------------------------------------------ |
+| Server Components | `app/page.tsx`, `app/[pokemonId]/page.tsx`                   |
+| Client Components | `components/InputSearch.tsx`, `error.tsx` files              |
+| Dynamic Routes    | `app/[pokemonId]/page.tsx`                                   |
+| `searchParams`    | `app/page.tsx` — offset & search                             |
+| `params`          | `app/[pokemonId]/page.tsx` — pokemon id                      |
+| `next/image`      | `PokemonCard`, detail page                                   |
+| `next/link`       | `PokemonCard`, detail page back button                       |
+| `next/navigation` | `InputSearch` — `useRouter`, `useSearchParams`, `notFound()` |
+| Root Layout       | `app/layout.tsx` — metadata, fonts, global CSS               |
+| Server-side fetch | `utils/fetchData.ts`                                         |
+| Error Boundaries  | `error.tsx` (runtime), `not-found.tsx` (404) — both scopes   |
+| Loading UI        | `loading.tsx` — Suspense skeletons for both routes           |
